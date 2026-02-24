@@ -337,7 +337,7 @@ class DashboardView(View):
     async def export_button(self, interaction: discord.Interaction, button: Button):
         if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
                                                                                               ephemeral=True)
-        if not users_col: return await interaction.response.send_message("❌ データベース未接続", ephemeral=True)
+        if users_col is None: return await interaction.response.send_message("❌ データベース未接続", ephemeral=True)
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(['Name', 'ID', 'Riot ID', 'Level', 'Link'])
@@ -359,7 +359,7 @@ class DashboardView(View):
 async def update_dashboard(interaction: discord.Interaction):
     admin_user = await bot.fetch_user(current_admin_id) if current_admin_id else None
     admin_name = admin_user.name if admin_user else "未設定"
-    member_count = users_col.count_documents({}) if users_col else 0
+    member_count = users_col.count_documents({}) if users_col is not None else 0
     mode_info = THRESHOLDS[current_mode]
     embed = discord.Embed(title="🎛️ 管理ダッシュボード", color=discord.Color.dark_theme())
     embed.add_field(name="🏠 サーバー", value=f"{interaction.guild.name}", inline=True)
@@ -375,7 +375,7 @@ async def update_dashboard(interaction: discord.Interaction):
 
 
 async def run_audit_logic(interaction: discord.Interaction):
-    if not users_col: return await interaction.followup.send("❌ データベース未接続")
+    if users_col is None: return await interaction.followup.send("❌ データベース未接続")
     status_msg = await interaction.followup.send("🔍 監査中... 0%", wait=True)
     users = list(users_col.find())
     total = len(users)
@@ -408,7 +408,6 @@ async def run_audit_logic(interaction: discord.Interaction):
 @oracle_group.command(name="link", description="アカウントを連携して審査を申請します")
 @app_commands.describe(riot_id_str="名前#タグ の形式で入力 (例: Name#JP1)")
 async def link(interaction: discord.Interaction, riot_id_str: str):
-    # API通信で時間がかかるため、タイムアウト防止のdeferを実行
     await interaction.response.defer()
 
     if '#' not in riot_id_str:
@@ -504,7 +503,7 @@ async def graduate(interaction: discord.Interaction, target: discord.Member):
     except:
         pass
     await interaction.guild.kick(target, reason="レベル卒業")
-    if users_col: users_col.delete_one({"discord_id": target.id})
+    if users_col is not None: users_col.delete_one({"discord_id": target.id})
     await interaction.response.send_message(f"🎓 {target.display_name} を卒業させました。")
 
 
@@ -518,7 +517,7 @@ async def graduate_rank(interaction: discord.Interaction, target: discord.Member
     except:
         pass
     await interaction.guild.kick(target, reason="ランク昇格")
-    if users_col: users_col.delete_one({"discord_id": target.id})
+    if users_col is not None: users_col.delete_one({"discord_id": target.id})
     await interaction.response.send_message(f"🎉 {target.display_name} を卒業させました。")
 
 
@@ -561,7 +560,7 @@ async def shutdown(interaction: discord.Interaction):
 
 @oracle_group.command(name="list", description="サーバーの登録メンバー一覧とOP.GGリンクを表示します")
 async def list_cmd(interaction: discord.Interaction):
-    if not users_col: return await interaction.response.send_message("❌ データベース未接続")
+    if users_col is None: return await interaction.response.send_message("❌ データベース未接続")
     users = users_col.find()
     msg = "**📋 メンバー一覧**\n"
     for u in users:
@@ -580,7 +579,7 @@ async def list_cmd(interaction: discord.Interaction):
     app_commands.Choice(name='KDA', value='kda'),
 ])
 async def leaderboard(interaction: discord.Interaction, category: app_commands.Choice[str]):
-    if not users_col: return await interaction.response.send_message("❌ データベース未接続")
+    if users_col is None: return await interaction.response.send_message("❌ データベース未接続")
     settings = {"level": "レベル", "win": "勝率", "kda": "KDA"}
     cat = category.value
     raw = list(users_col.find())
@@ -670,7 +669,7 @@ async def on_ready():
     if LOG_CHANNEL_ID:
         try:
             channel = bot.get_channel(LOG_CHANNEL_ID)
-            if channel: await channel.send("✅ **BOTが起動しました** (スラッシュコマンド完全対応版)")
+            if channel: await channel.send("✅ **BOTが起動しました** (PyMongoエラー修正完了)")
         except:
             pass
 
