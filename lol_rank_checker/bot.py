@@ -9,6 +9,7 @@ import certifi
 import time
 import requests
 from discord.ext import commands
+from discord import app_commands
 from discord.ui import Button, View, Select
 from riotwatcher import LolWatcher, RiotWatcher, ApiError
 from pymongo import MongoClient
@@ -41,7 +42,7 @@ REGION_PLATFORM = 'jp1'
 REGION_ACCOUNT = 'asia'
 MAX_LEVEL = 150
 
-# モード設定 (基準値はスマーフ検知のため厳しめに戻しました)
+# モード設定
 current_mode = "BEGINNER"
 THRESHOLDS = {
     "BEGINNER": {"name": "🔰 初心者帯 (Iron/Bronze)", "win_rate": 60, "kda": 4.0, "cspm": 7.0, "gpm": 450, "dmg": 30.0},
@@ -57,7 +58,10 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix='/', intents=intents, help_command=None)
+bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
+
+# 🔥 親コマンドグループの作成
+oracle_group = app_commands.Group(name="oracle", description="オラクルレンズ管理コマンド")
 
 api_config = {"timeout": 20.0}
 
@@ -102,10 +106,8 @@ if MONGO_URL:
 # ==========================================
 # 補助関数
 # ==========================================
-def is_admin_or_owner(ctx_or_interaction):
-    user = ctx_or_interaction.author if isinstance(ctx_or_interaction, commands.Context) else ctx_or_interaction.user
-    guild = ctx_or_interaction.guild
-    return user.id == current_admin_id or user.id == guild.owner_id
+def is_admin_or_owner(interaction: discord.Interaction):
+    return interaction.user.id == current_admin_id or interaction.user.id == interaction.guild.owner_id
 
 
 def save_user_to_db(discord_id, riot_name, riot_tag, puuid, level, stats=None):
@@ -301,12 +303,11 @@ async def analyze_player_stats(riot_id_name, riot_id_tag, discord_id_for_save=No
 
 
 # ==========================================
-# UI & コマンド
+# UI & システム共通
 # ==========================================
 class DashboardView(View):
-    def __init__(self, ctx):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.ctx = ctx
 
     @discord.ui.select(
         placeholder="📊 分析モードを変更する...",
@@ -322,16 +323,15 @@ class DashboardView(View):
                                                                                               ephemeral=True)
         global current_mode
         current_mode = select.values[0]
-        await interaction.response.send_message(f"✅ モードを変更しました: **{THRESHOLDS[current_mode]['name']}**",
-                                                ephemeral=True)
-        await update_dashboard(interaction, self.ctx)
+        await interaction.response.defer()
+        await update_dashboard(interaction)
 
     @discord.ui.button(label="一括監査", style=discord.ButtonStyle.danger, emoji="🔍")
     async def audit_button(self, interaction: discord.Interaction, button: Button):
         if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
                                                                                               ephemeral=True)
-        await interaction.response.send_message("⏳ 監査を開始します...", ephemeral=True)
-        await run_audit_logic(self.ctx)
+        await interaction.response.defer()
+        await run_audit_logic(interaction)
 
     @discord.ui.button(label="CSV出力", style=discord.ButtonStyle.success, emoji="📥")
     async def export_button(self, interaction: discord.Interaction, button: Button):
@@ -344,7 +344,7 @@ class DashboardView(View):
         for u in users_col.find():
             name_safe = u['riot_name'].replace(" ", "%20")
             url = f"https://www.op.gg/summoners/jp/{name_safe}-{u['riot_tag']}"
-            u_obj = self.ctx.guild.get_member(u['discord_id'])
+            u_obj = interaction.guild.get_member(u['discord_id'])
             d_name = u_obj.name if u_obj else "Unknown"
             writer.writerow([d_name, u['discord_id'], f"{u['riot_name']}#{u['riot_tag']}", u['level'], url])
         output.seek(0)
@@ -352,36 +352,38 @@ class DashboardView(View):
 
     @discord.ui.button(label="更新", style=discord.ButtonStyle.secondary, emoji="🔄")
     async def refresh_button(self, interaction: discord.Interaction, button: Button):
-        await update_dashboard(interaction, self.ctx)
+        await interaction.response.defer()
+        await update_dashboard(interaction)
 
 
-async def update_dashboard(interaction_or_ctx, ctx_origin):
+async def update_dashboard(interaction: discord.Interaction):
     admin_user = await bot.fetch_user(current_admin_id) if current_admin_id else None
     admin_name = admin_user.name if admin_user else "未設定"
     member_count = users_col.count_documents({}) if users_col else 0
     mode_info = THRESHOLDS[current_mode]
     embed = discord.Embed(title="🎛️ 管理ダッシュボード", color=discord.Color.dark_theme())
-    embed.add_field(name="🏠 サーバー", value=f"{ctx_origin.guild.name}", inline=True)
+    embed.add_field(name="🏠 サーバー", value=f"{interaction.guild.name}", inline=True)
     embed.add_field(name="👤 管理者", value=f"{admin_name}", inline=True)
     embed.add_field(name="👥 メンバー数", value=f"{member_count} 名", inline=True)
     embed.add_field(name="📊 モード", value=f"**{mode_info['name']}**", inline=False)
-    view = DashboardView(ctx_origin)
-    if isinstance(interaction_or_ctx, commands.Context):
-        await interaction_or_ctx.send(embed=embed, view=view)
+    view = DashboardView()
+
+    if interaction.response.is_done():
+        await interaction.edit_original_response(embed=embed, view=view)
     else:
-        await interaction_or_ctx.response.edit_message(embed=embed, view=view)
+        await interaction.response.send_message(embed=embed, view=view)
 
 
-async def run_audit_logic(ctx):
-    if not users_col: return await ctx.send("❌ データベース未接続")
-    status_msg = await ctx.send("🔍 監査中... 0%")
+async def run_audit_logic(interaction: discord.Interaction):
+    if not users_col: return await interaction.followup.send("❌ データベース未接続")
+    status_msg = await interaction.followup.send("🔍 監査中... 0%", wait=True)
     users = list(users_col.find())
     total = len(users)
     graduates = []
-    role_advisor = discord.utils.get(ctx.guild.roles, name=ROLE_ADVISOR)
-    role_grace = discord.utils.get(ctx.guild.roles, name=ROLE_GRACE)
+    role_advisor = discord.utils.get(interaction.guild.roles, name=ROLE_ADVISOR)
+    role_grace = discord.utils.get(interaction.guild.roles, name=ROLE_GRACE)
     for i, u in enumerate(users):
-        member = ctx.guild.get_member(u['discord_id'])
+        member = interaction.guild.get_member(u['discord_id'])
         if member:
             if role_advisor and role_advisor in member.roles: continue
             if role_grace and role_grace in member.roles: continue
@@ -396,93 +398,64 @@ async def run_audit_logic(ctx):
             pass
         if i % 5 == 0: await status_msg.edit(content=f"🔍 監査中... {int((i / total) * 100)}%")
     await status_msg.edit(content="✅ 監査完了")
-    if graduates: await ctx.send(f"⚠️ **卒業対象:**\n" + "\n".join(graduates))
+    if graduates: await interaction.followup.send(f"⚠️ **卒業対象:**\n" + "\n".join(graduates))
 
 
-@bot.event
-async def on_ready():
-    print(f'Bot is ready: {bot.user.name}')
-    if LOG_CHANNEL_ID:
-        try:
-            channel = bot.get_channel(LOG_CHANNEL_ID)
-            if channel: await channel.send("✅ **BOTが起動しました** (GPM注釈追加・/audit復旧)")
-        except:
-            pass
+# ==========================================
+# スラッシュコマンド群 (グループ: /oracle)
+# ==========================================
 
+@oracle_group.command(name="link", description="アカウントを連携して審査を申請します")
+@app_commands.describe(riot_id_str="名前#タグ の形式で入力 (例: Name#JP1)")
+async def link(interaction: discord.Interaction, riot_id_str: str):
+    # API通信で時間がかかるため、タイムアウト防止のdeferを実行
+    await interaction.response.defer()
 
-@bot.command()
-async def dashboard(ctx):
-    if not is_admin_or_owner(ctx): return
-    await update_dashboard(ctx, ctx)
-
-
-# /audit コマンドを復活させました
-@bot.command()
-async def audit(ctx):
-    if not is_admin_or_owner(ctx): return
-    await ctx.send("⏳ 監査を開始します...")
-    await run_audit_logic(ctx)
-
-
-@bot.command()
-async def standards(ctx):
-    mode = THRESHOLDS[current_mode]
-    embed = discord.Embed(title=f"📏 現在の基準: {mode['name']}", color=discord.Color.blue())
-    embed.add_field(name="勝率", value=f"**{mode['win_rate']}%** 以上で警告", inline=True)
-    embed.add_field(name="KDA", value=f"**{mode['kda']}** 以上で警告", inline=True)
-    embed.add_field(name="CS/分", value=f"**{mode['cspm']}** 以上で警告", inline=True)
-    # GPMの項目にADC用の注釈を追加
-    embed.add_field(name="Gold/分", value=f"**{mode['gpm']}** 以上で警告\n*(※ADC等は+100程度まで正常値の可能性あり)*",
-                    inline=True)
-    embed.add_field(name="DMGシェア", value=f"**{mode['dmg']}%** 以上で警告", inline=True)
-    embed.add_field(name="レベル上限", value=f"**Lv.{MAX_LEVEL}** (これ以上は卒業)", inline=False)
-    await ctx.send(embed=embed)
-
-
-@bot.command()
-async def link(ctx, *, riot_id_str):
-    if '#' not in riot_id_str: return await ctx.send("❌ `名前#タグ` の形式で入力してください (例: Name#JP1)")
-    if current_guild_id != 0 and ctx.guild.id != current_guild_id: return await ctx.send("⚠️ 対象外サーバー")
+    if '#' not in riot_id_str:
+        return await interaction.followup.send("❌ `名前#タグ` の形式で入力してください (例: Name#JP1)")
+    if current_guild_id != 0 and interaction.guild.id != current_guild_id:
+        return await interaction.followup.send("⚠️ 対象外サーバー")
 
     riot_id_str = riot_id_str.replace("　", " ")
 
-    role_advisor = discord.utils.get(ctx.guild.roles, name=ROLE_ADVISOR)
-    role_grace = discord.utils.get(ctx.guild.roles, name=ROLE_GRACE)
+    role_advisor = discord.utils.get(interaction.guild.roles, name=ROLE_ADVISOR)
+    role_grace = discord.utils.get(interaction.guild.roles, name=ROLE_GRACE)
     is_exempt = False
-    if role_advisor and role_advisor in ctx.author.roles: is_exempt = True
-    if role_grace and role_grace in ctx.author.roles: is_exempt = True
+    if role_advisor and role_advisor in interaction.user.roles: is_exempt = True
+    if role_grace and role_grace in interaction.user.roles: is_exempt = True
 
     name, tag = riot_id_str.rsplit('#', 1)
     note = "(免除対象)" if is_exempt else ""
-    await ctx.send(f"📊 `{name}#{tag}` を分析中... {note}")
-    result = await analyze_player_stats(name, tag, ctx.author.id, is_exempt=is_exempt)
+
+    await interaction.followup.send(f"📊 `{name}#{tag}` を分析中... {note}")
+
+    result = await analyze_player_stats(name, tag, interaction.user.id, is_exempt=is_exempt)
     status = result['status']
-    if status == "ERROR": return await ctx.send(f"{result['reason']}")
-    member = ctx.author
+
+    if status == "ERROR":
+        return await interaction.followup.send(f"{result['reason']}")
+
+    member = interaction.user
     if status == "GRADUATE":
-        await ctx.send("🎓 レベル上限超過のため卒業対象です。")
+        await interaction.followup.send("🎓 レベル上限超過のため卒業対象です。")
         try:
             admin = await bot.fetch_user(current_admin_id)
             if admin:
                 d = result['data']
                 await admin.send(
-                    f"**【🎓 卒業推奨】**\n対象: {member.mention}\nID: `{d['riot_id']}`\nLv: **{d['level_raw']}**\n`/graduate {member.id}`")
+                    f"**【🎓 卒業推奨】**\n対象: {member.mention}\nID: `{d['riot_id']}`\nLv: **{d['level_raw']}**\n`/oracle graduate target:{member.mention}`")
         except:
             pass
         return
-    role_waiting = discord.utils.get(ctx.guild.roles, name=ROLE_WAITING)
+
+    role_waiting = discord.utils.get(interaction.guild.roles, name=ROLE_WAITING)
     if role_waiting: await member.add_roles(role_waiting)
 
-    await ctx.send("📋 集計完了。承認をお待ちください。")
+    await interaction.followup.send("📋 集計完了。承認をお待ちください。")
 
-    print(f"🔍 [DEBUG] 管理者ID(環境変数): {current_admin_id}")
     try:
-        if current_admin_id == 0:
-            print("❌ [ERROR] 管理者ID未設定")
-            return
-
+        if current_admin_id == 0: return
         admin = await bot.fetch_user(current_admin_id)
-
         d = result['data']
         opgg = f"https://www.op.gg/summoners/jp/{name.replace(' ', '%20')}-{tag}"
         mode_name = THRESHOLDS[current_mode]['name']
@@ -493,159 +466,215 @@ async def link(ctx, *, riot_id_str):
                f"Lv: {d.get('fmt_level', '不明')} Win:{d.get('fmt_win', '不明')} KDA:{d.get('fmt_kda', '不明')}\n"
                f"CS:{d.get('fmt_cspm', '不明')} GPM: {d.get('fmt_gpm', '不明')} Dmg:{d.get('fmt_dmg', '不明')}\n"
                f"警告: {d.get('troll', '不明')} [OP.GG]({opgg})\n"
-               f"`/approve {member.id}` / `/reject {member.id}`")
+               f"承認・拒否: `/oracle approve target:{member.mention}`")
 
         await admin.send(msg)
-        print("📨 [SUCCESS] DM送信に成功しました！")
-
     except Exception as e:
-        print(f"❌ [ERROR] DM送信エラー: {e}")
-        traceback.print_exc()
+        print(f"❌ DM送信エラー: {e}")
 
 
-@bot.command()
-async def approve(ctx, user_id: int):
-    if ctx.author.id != current_admin_id: return
-    member = ctx.guild.get_member(user_id)
-    if member:
-        role_mem = discord.utils.get(ctx.guild.roles, name=ROLE_MEMBER)
-        role_wait = discord.utils.get(ctx.guild.roles, name=ROLE_WAITING)
-        if role_wait in member.roles: await member.remove_roles(role_wait)
-        if role_mem: await member.add_roles(role_mem)
-        await ctx.send(f"✅ {member.display_name} を承認しました。")
+@oracle_group.command(name="approve", description="[管理者] 申請を手動で承認します")
+@app_commands.describe(target="承認するメンバーを選択")
+async def approve(interaction: discord.Interaction, target: discord.Member):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    role_mem = discord.utils.get(interaction.guild.roles, name=ROLE_MEMBER)
+    role_wait = discord.utils.get(interaction.guild.roles, name=ROLE_WAITING)
+    if role_wait in target.roles: await target.remove_roles(role_wait)
+    if role_mem: await target.add_roles(role_mem)
+    await interaction.response.send_message(f"✅ {target.display_name} を承認しました。")
 
 
-@bot.command()
-async def reject(ctx, user_id: int):
-    if ctx.author.id != current_admin_id: return
-    member = ctx.guild.get_member(user_id)
-    if member:
-        await ctx.guild.kick(member, reason="審査拒否")
-        await ctx.send(f"🚫 {member.display_name} を拒否しました。")
+@oracle_group.command(name="reject", description="[管理者] 申請を拒否し、キックします")
+@app_commands.describe(target="拒否するメンバーを選択")
+async def reject(interaction: discord.Interaction, target: discord.Member):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    await interaction.guild.kick(target, reason="審査拒否")
+    await interaction.response.send_message(f"🚫 {target.display_name} を拒否しました。")
 
 
-@bot.command()
-async def graduate(ctx, user_id: int):
-    if ctx.author.id != current_admin_id: return
-    member = ctx.guild.get_member(user_id)
-    if member:
-        try:
-            await member.send(f"🌸 レベル上限({MAX_LEVEL})により卒業となります。")
-        except:
-            pass
-        await ctx.guild.kick(member, reason="レベル卒業")
-        if users_col: users_col.delete_one({"discord_id": user_id})
-        await ctx.send(f"🎓 {member.display_name} を卒業させました。")
+@oracle_group.command(name="graduate", description="[管理者] メンバーをレベル上限等で卒業(キック)させます")
+@app_commands.describe(target="卒業させるメンバーを選択")
+async def graduate(interaction: discord.Interaction, target: discord.Member):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    try:
+        await target.send(f"🌸 レベル上限({MAX_LEVEL})により卒業となります。")
+    except:
+        pass
+    await interaction.guild.kick(target, reason="レベル卒業")
+    if users_col: users_col.delete_one({"discord_id": target.id})
+    await interaction.response.send_message(f"🎓 {target.display_name} を卒業させました。")
 
 
-@bot.command()
-async def graduate_rank(ctx, user_id: int):
-    if ctx.author.id != current_admin_id: return
-    member = ctx.guild.get_member(user_id)
-    if member:
-        try:
-            await member.send(f"🎉 ランク昇格おめでとうございます！卒業となります。")
-        except:
-            pass
-        await ctx.guild.kick(member, reason="ランク昇格")
-        if users_col: users_col.delete_one({"discord_id": user_id})
-        await ctx.send(f"🎉 {member.display_name} を卒業させました。")
+@oracle_group.command(name="graduate_rank", description="[管理者] メンバーをランク昇格で卒業(キック)させます")
+@app_commands.describe(target="卒業させるメンバーを選択")
+async def graduate_rank(interaction: discord.Interaction, target: discord.Member):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    try:
+        await target.send(f"🎉 ランク昇格おめでとうございます！卒業となります。")
+    except:
+        pass
+    await interaction.guild.kick(target, reason="ランク昇格")
+    if users_col: users_col.delete_one({"discord_id": target.id})
+    await interaction.response.send_message(f"🎉 {target.display_name} を卒業させました。")
 
 
-@bot.command()
-async def shutdown(ctx):
-    if not is_admin_or_owner(ctx): return
-    await ctx.send("システムをシャットダウンします...")
+@oracle_group.command(name="dashboard", description="[管理者] 管理パネルを開きます")
+async def dashboard(interaction: discord.Interaction):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    await update_dashboard(interaction)
+
+
+@oracle_group.command(name="audit", description="[管理者] 全メンバーのレベルを一斉監査します")
+async def audit(interaction: discord.Interaction):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    await interaction.response.defer()
+    await run_audit_logic(interaction)
+
+
+@oracle_group.command(name="set_mode", description="[管理者] 審査基準モードを変更します")
+@app_commands.choices(mode=[
+    app_commands.Choice(name='初心者帯 (BEGINNER)', value='BEGINNER'),
+    app_commands.Choice(name='中級者帯 (INTERMEDIATE)', value='INTERMEDIATE'),
+    app_commands.Choice(name='上級者帯 (ADVANCED)', value='ADVANCED'),
+])
+async def set_mode_cmd(interaction: discord.Interaction, mode: app_commands.Choice[str]):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    global current_mode
+    current_mode = mode.value
+    await interaction.response.send_message(f"✅ モード変更: {THRESHOLDS[mode.value]['name']}")
+
+
+@oracle_group.command(name="shutdown", description="[管理者] Botを安全に停止させます")
+async def shutdown(interaction: discord.Interaction):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    await interaction.response.send_message("システムをシャットダウンします...")
     await bot.close()
 
 
-@bot.command()
-async def list(ctx):
-    if not users_col: return await ctx.send("❌ データベース未接続")
+@oracle_group.command(name="list", description="サーバーの登録メンバー一覧とOP.GGリンクを表示します")
+async def list_cmd(interaction: discord.Interaction):
+    if not users_col: return await interaction.response.send_message("❌ データベース未接続")
     users = users_col.find()
     msg = "**📋 メンバー一覧**\n"
     for u in users:
         url = f"https://www.op.gg/summoners/jp/{u['riot_name'].replace(' ', '%20')}-{u['riot_tag']}"
-        d_user = ctx.guild.get_member(u['discord_id'])
+        d_user = interaction.guild.get_member(u['discord_id'])
         d_name = d_user.display_name if d_user else "退室済み"
         msg += f"• **{d_name}**: [{u['riot_name']}#{u['riot_tag']}]({url}) (Lv.{u['level']})\n"
     if len(msg) > 1900: msg = msg[:1900] + "..."
-    await ctx.send(msg)
+    await interaction.response.send_message(msg)
 
 
-@bot.command()
-async def leaderboard(ctx, category: str = "level"):
-    if not users_col: return await ctx.send("❌ データベース未接続")
+@oracle_group.command(name="leaderboard", description="各種ランキングを表示します")
+@app_commands.choices(category=[
+    app_commands.Choice(name='レベル', value='level'),
+    app_commands.Choice(name='勝率', value='win'),
+    app_commands.Choice(name='KDA', value='kda'),
+])
+async def leaderboard(interaction: discord.Interaction, category: app_commands.Choice[str]):
+    if not users_col: return await interaction.response.send_message("❌ データベース未接続")
     settings = {"level": "レベル", "win": "勝率", "kda": "KDA"}
-    cat = category.lower()
-    if cat not in settings: return await ctx.send("❌ `/leaderboard level` `/leaderboard win` `/leaderboard kda`")
+    cat = category.value
     raw = list(users_col.find())
     data = []
     for u in raw:
-        mem = ctx.guild.get_member(u['discord_id'])
+        mem = interaction.guild.get_member(u['discord_id'])
         if mem:
             val = u.get("win_rate" if cat == "win" else "kda" if cat == "kda" else "level", 0)
             data.append({"name": u['riot_name'], "val": val})
     data.sort(key=lambda x: x["val"], reverse=True)
     text = ""
     for i, d in enumerate(data[:10]): text += f"{i + 1}. **{d['name']}** - {round(d['val'], 1)}\n"
-    await ctx.send(embed=discord.Embed(title=f"🏆 {settings[cat]}ランキング", description=text or "データなし",
-                                       color=discord.Color.gold()))
+    await interaction.response.send_message(
+        embed=discord.Embed(title=f"🏆 {settings[cat]}ランキング", description=text or "データなし",
+                            color=discord.Color.gold()))
 
 
-@bot.command(aliases=['manual'])
-async def help(ctx):
+@oracle_group.command(name="standards", description="現在の審査基準（目標スコア）を確認します")
+async def standards(interaction: discord.Interaction):
+    mode = THRESHOLDS[current_mode]
+    embed = discord.Embed(title=f"📏 現在の基準: {mode['name']}", color=discord.Color.blue())
+    embed.add_field(name="勝率", value=f"**{mode['win_rate']}%** 以上で警告", inline=True)
+    embed.add_field(name="KDA", value=f"**{mode['kda']}** 以上で警告", inline=True)
+    embed.add_field(name="CS/分", value=f"**{mode['cspm']}** 以上で警告", inline=True)
+    embed.add_field(name="Gold/分", value=f"**{mode['gpm']}** 以上で警告\n*(※ADC等は+100程度まで正常値の可能性あり)*",
+                    inline=True)
+    embed.add_field(name="DMGシェア", value=f"**{mode['dmg']}%** 以上で警告", inline=True)
+    embed.add_field(name="レベル上限", value=f"**Lv.{MAX_LEVEL}** (これ以上は卒業)", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@oracle_group.command(name="help", description="オラクルレンズの使い方ガイドを表示します")
+async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(title="📜 オラクルレンズ 使い方ガイド", color=discord.Color.blue())
-    embed.description = "コマンドの先頭には半角スラッシュ `/` をつけて入力してください。"
+    embed.description = "チャット欄で `/oracle` と入力すると、コマンドの候補が表示されます。"
 
     general_help = (
-        "**`/link [名前#タグ]`**\n"
+        "**`/oracle link [名前#タグ]`**\n"
         "➔ アカウントを連携して審査を申請します。\n"
-        "*(例: `/link PINOCO 0005#0003`)*\n\n"
-        "**`/list`**\n"
-        "➔ サーバーの登録メンバー一覧とOP.GGリンクを表示します。\n\n"
-        "**`/standards`**\n"
-        "➔ 現在の審査基準（目標スコア）を確認します。\n\n"
-        "**`/leaderboard [項目]`**\n"
-        "➔ ランキングを表示します。\n"
-        "*(項目: `level` または `win` または `kda`)*"
+        "**`/oracle list`**\n"
+        "➔ サーバーの登録メンバー一覧とOP.GGリンクを表示します。\n"
+        "**`/oracle standards`**\n"
+        "➔ 現在の審査基準（目標スコア）を確認します。\n"
+        "**`/oracle leaderboard`**\n"
+        "➔ ランキングを表示します。"
     )
     embed.add_field(name="🔰 一般向けコマンド", value=general_help, inline=False)
 
-    if is_admin_or_owner(ctx):
+    if is_admin_or_owner(interaction):
         admin_help = (
-            "**`/dashboard`**\n"
-            "➔ 管理パネルを開きます（基準変更、CSV出力など）。\n\n"
-            "**`/audit`**\n"
-            "➔ データベース内の全メンバーのレベルを一斉監査します。\n\n"
-            "**`/set_mode [モード名]`**\n"
-            "➔ 審査基準を変更します。*(BEGINNER, INTERMEDIATE, ADVANCED)*\n\n"
-            "**`/approve [ID]`** / **`/reject [ID]`**\n"
-            "➔ 申請を手動で承認 / 拒否します。\n\n"
-            "**`/graduate [ID]`**\n"
-            "➔ メンバーを卒業させます。\n\n"
-            "**`/shutdown`**\n"
+            "**`/oracle dashboard`**\n"
+            "➔ 管理パネルを開きます（基準変更、CSV出力など）。\n"
+            "**`/oracle audit`**\n"
+            "➔ データベース内の全メンバーのレベルを一斉監査します。\n"
+            "**`/oracle set_mode`**\n"
+            "➔ 審査基準を変更します。*(リストから選択可能)*\n"
+            "**`/oracle approve`** / **`/oracle reject`**\n"
+            "➔ 申請を手動で承認 / 拒否します。*(メンバーをリストから選択可能)*\n"
+            "**`/oracle graduate`**\n"
+            "➔ メンバーを卒業させます。\n"
+            "**`/oracle shutdown`**\n"
             "➔ Botを安全に停止します。"
         )
         embed.add_field(name="👑 管理者向けコマンド", value=admin_help, inline=False)
 
     embed.set_footer(text="困ったときは管理者に連絡してください。")
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command()
-async def set_mode(ctx, mode: str):
-    if not is_admin_or_owner(ctx): return
-    global current_mode
-    mode = mode.upper()
-    if mode in THRESHOLDS:
-        current_mode = mode
-        await ctx.send(f"✅ モード変更: {THRESHOLDS[mode]['name']}")
+# グループをBotに登録
+bot.tree.add_command(oracle_group)
 
 
 # ==========================================
-# 起動処理 (エラー時待機機能付き)
+# 起動処理
 # ==========================================
+@bot.event
+async def on_ready():
+    print(f'Bot is ready: {bot.user.name}')
+    try:
+        # スラッシュコマンドをDiscordサーバーに同期する
+        synced = await bot.tree.sync()
+        print(f"✅ {len(synced)} 個のコマンドグループを同期しました。")
+    except Exception as e:
+        print(f"❌ コマンド同期エラー: {e}")
+
+    if LOG_CHANNEL_ID:
+        try:
+            channel = bot.get_channel(LOG_CHANNEL_ID)
+            if channel: await channel.send("✅ **BOTが起動しました** (スラッシュコマンド完全対応版)")
+        except:
+            pass
+
+
 keep_alive()
 
 if DISCORD_TOKEN:
