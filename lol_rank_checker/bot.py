@@ -41,7 +41,7 @@ REGION_PLATFORM = 'jp1'
 REGION_ACCOUNT = 'asia'
 MAX_LEVEL = 150
 
-# モード設定
+# モード設定 (基準値はスマーフ検知のため厳しめに戻しました)
 current_mode = "BEGINNER"
 THRESHOLDS = {
     "BEGINNER": {"name": "🔰 初心者帯 (Iron/Bronze)", "win_rate": 60, "kda": 4.0, "cspm": 7.0, "gpm": 450, "dmg": 30.0},
@@ -56,7 +56,8 @@ THRESHOLDS = {
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = commands.Bot(command_prefix='/', intents=intents)
+
+bot = commands.Bot(command_prefix='/', intents=intents, help_command=None)
 
 api_config = {"timeout": 20.0}
 
@@ -119,14 +120,12 @@ def save_user_to_db(discord_id, riot_name, riot_tag, puuid, level, stats=None):
             "last_updated": now
         }
         if stats: update_data.update(stats)
-        # timeoutオプションを削除して安定性向上
         users_col.update_one({"discord_id": discord_id}, {"$set": update_data}, upsert=True)
         print(f"💾 DB保存完了: {riot_name}#{riot_tag}")
     except Exception as e:
         print(f"⚠️ DB保存スキップ: {e}")
 
 
-# Riot API用リトライ関数
 def call_riot_api(func, *args, **kwargs):
     max_retries = 3
     for i in range(max_retries):
@@ -134,7 +133,6 @@ def call_riot_api(func, *args, **kwargs):
             return func(*args, **kwargs)
         except Exception as e:
             if isinstance(e, ApiError):
-                # 500番台のエラーはRiot側の問題なのでリトライ対象
                 if e.response.status_code in [404, 403]:
                     raise e
 
@@ -151,11 +149,11 @@ def call_riot_api(func, *args, **kwargs):
 
 
 # ==========================================
-# 分析ロジック (KeyError修正版)
+# 分析ロジック
 # ==========================================
 async def analyze_player_stats(riot_id_name, riot_id_tag, discord_id_for_save=None, is_exempt=False):
     config = THRESHOLDS[current_mode]
-    riot_id_combined = f"{riot_id_name}#{riot_id_tag}"  # 先に定義しておく
+    riot_id_combined = f"{riot_id_name}#{riot_id_tag}"
 
     try:
         try:
@@ -237,9 +235,7 @@ async def analyze_player_stats(riot_id_name, riot_id_tag, discord_id_for_save=No
             if item_cnt <= 1 and duration_min > 10: troll_items += 1
             if team_total_dmg > 0 and (me['totalDamageDealtToChampions'] / team_total_dmg) * 100 < 5.0: troll_dmg += 1
 
-        # データ不足時のクラッシュ対策
         if valid == 0:
-            # データ不足時でも必要な情報をダミーで埋めて返す
             safe_data = {
                 "riot_id": riot_id_combined,
                 "level_raw": acct_level,
@@ -393,7 +389,6 @@ async def run_audit_logic(ctx):
         try:
             summ = call_riot_api(lol_watcher.summoner.by_puuid, REGION_PLATFORM, u['puuid'])
             new_level = summ['summonerLevel']
-            # timeoutオプションを削除
             users_col.update_one({"_id": u['_id']}, {"$set": {"level": new_level}})
             if new_level >= MAX_LEVEL:
                 graduates.append(f"<@{u['discord_id']}> (Lv.{new_level})")
@@ -410,7 +405,7 @@ async def on_ready():
     if LOG_CHANNEL_ID:
         try:
             channel = bot.get_channel(LOG_CHANNEL_ID)
-            if channel: await channel.send("✅ **BOTが起動しました** (Riot障害対策済み)")
+            if channel: await channel.send("✅ **BOTが起動しました** (GPM注釈追加・/audit復旧)")
         except:
             pass
 
@@ -421,6 +416,14 @@ async def dashboard(ctx):
     await update_dashboard(ctx, ctx)
 
 
+# /audit コマンドを復活させました
+@bot.command()
+async def audit(ctx):
+    if not is_admin_or_owner(ctx): return
+    await ctx.send("⏳ 監査を開始します...")
+    await run_audit_logic(ctx)
+
+
 @bot.command()
 async def standards(ctx):
     mode = THRESHOLDS[current_mode]
@@ -428,7 +431,9 @@ async def standards(ctx):
     embed.add_field(name="勝率", value=f"**{mode['win_rate']}%** 以上で警告", inline=True)
     embed.add_field(name="KDA", value=f"**{mode['kda']}** 以上で警告", inline=True)
     embed.add_field(name="CS/分", value=f"**{mode['cspm']}** 以上で警告", inline=True)
-    embed.add_field(name="Gold/分", value=f"**{mode['gpm']}** 以上で警告", inline=True)
+    # GPMの項目にADC用の注釈を追加
+    embed.add_field(name="Gold/分", value=f"**{mode['gpm']}** 以上で警告\n*(※ADC等は+100程度まで正常値の可能性あり)*",
+                    inline=True)
     embed.add_field(name="DMGシェア", value=f"**{mode['dmg']}%** 以上で警告", inline=True)
     embed.add_field(name="レベル上限", value=f"**Lv.{MAX_LEVEL}** (これ以上は卒業)", inline=False)
     await ctx.send(embed=embed)
@@ -470,7 +475,6 @@ async def link(ctx, *, riot_id_str):
 
     await ctx.send("📋 集計完了。承認をお待ちください。")
 
-    # DM送信（デバッグログ付き）
     print(f"🔍 [DEBUG] 管理者ID(環境変数): {current_admin_id}")
     try:
         if current_admin_id == 0:
@@ -480,7 +484,6 @@ async def link(ctx, *, riot_id_str):
         admin = await bot.fetch_user(current_admin_id)
 
         d = result['data']
-        # Riotエラー時はデータが存在しない可能性があるので .get() を使う
         opgg = f"https://www.op.gg/summoners/jp/{name.replace(' ', '%20')}-{tag}"
         mode_name = THRESHOLDS[current_mode]['name']
 
@@ -590,14 +593,43 @@ async def leaderboard(ctx, category: str = "level"):
                                        color=discord.Color.gold()))
 
 
-@bot.command()
-async def manual(ctx):
-    embed = discord.Embed(title="📜 Botコマンド一覧", color=discord.Color.blue())
-    embed.add_field(name="🔰 一般用",
-                    value="`/link [名前#タグ]` : アカウント連携\n`/list` : メンバー一覧\n`/standards` : 基準値の確認\n`/leaderboard [項目]` : ランキング",
-                    inline=False)
+@bot.command(aliases=['manual'])
+async def help(ctx):
+    embed = discord.Embed(title="📜 オラクルレンズ 使い方ガイド", color=discord.Color.blue())
+    embed.description = "コマンドの先頭には半角スラッシュ `/` をつけて入力してください。"
+
+    general_help = (
+        "**`/link [名前#タグ]`**\n"
+        "➔ アカウントを連携して審査を申請します。\n"
+        "*(例: `/link PINOCO 0005#0003`)*\n\n"
+        "**`/list`**\n"
+        "➔ サーバーの登録メンバー一覧とOP.GGリンクを表示します。\n\n"
+        "**`/standards`**\n"
+        "➔ 現在の審査基準（目標スコア）を確認します。\n\n"
+        "**`/leaderboard [項目]`**\n"
+        "➔ ランキングを表示します。\n"
+        "*(項目: `level` または `win` または `kda`)*"
+    )
+    embed.add_field(name="🔰 一般向けコマンド", value=general_help, inline=False)
+
     if is_admin_or_owner(ctx):
-        embed.add_field(name="👑 管理者用", value="`/dashboard` : 管理パネル\n`/shutdown` : Bot停止", inline=False)
+        admin_help = (
+            "**`/dashboard`**\n"
+            "➔ 管理パネルを開きます（基準変更、CSV出力など）。\n\n"
+            "**`/audit`**\n"
+            "➔ データベース内の全メンバーのレベルを一斉監査します。\n\n"
+            "**`/set_mode [モード名]`**\n"
+            "➔ 審査基準を変更します。*(BEGINNER, INTERMEDIATE, ADVANCED)*\n\n"
+            "**`/approve [ID]`** / **`/reject [ID]`**\n"
+            "➔ 申請を手動で承認 / 拒否します。\n\n"
+            "**`/graduate [ID]`**\n"
+            "➔ メンバーを卒業させます。\n\n"
+            "**`/shutdown`**\n"
+            "➔ Botを安全に停止します。"
+        )
+        embed.add_field(name="👑 管理者向けコマンド", value=admin_help, inline=False)
+
+    embed.set_footer(text="困ったときは管理者に連絡してください。")
     await ctx.send(embed=embed)
 
 
