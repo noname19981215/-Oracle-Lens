@@ -405,6 +405,7 @@ async def run_audit_logic(interaction: discord.Interaction):
 # スラッシュコマンド群 (グループ: /oracle)
 # ==========================================
 
+# 🟢 一般ユーザーも使えるコマンド
 @oracle_group.command(name="link", description="アカウントを連携して審査を申請します")
 @app_commands.describe(riot_id_str="名前#タグ の形式で入力 (例: Name#JP1)")
 async def link(interaction: discord.Interaction, riot_id_str: str):
@@ -470,92 +471,6 @@ async def link(interaction: discord.Interaction, riot_id_str: str):
         await admin.send(msg)
     except Exception as e:
         print(f"❌ DM送信エラー: {e}")
-
-
-@oracle_group.command(name="approve", description="[管理者] 申請を手動で承認します")
-@app_commands.describe(target="承認するメンバーを選択")
-async def approve(interaction: discord.Interaction, target: discord.Member):
-    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
-                                                                                          ephemeral=True)
-    role_mem = discord.utils.get(interaction.guild.roles, name=ROLE_MEMBER)
-    role_wait = discord.utils.get(interaction.guild.roles, name=ROLE_WAITING)
-    if role_wait in target.roles: await target.remove_roles(role_wait)
-    if role_mem: await target.add_roles(role_mem)
-    await interaction.response.send_message(f"✅ {target.display_name} を承認しました。")
-
-
-@oracle_group.command(name="reject", description="[管理者] 申請を拒否し、キックします")
-@app_commands.describe(target="拒否するメンバーを選択")
-async def reject(interaction: discord.Interaction, target: discord.Member):
-    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
-                                                                                          ephemeral=True)
-    await interaction.guild.kick(target, reason="審査拒否")
-    await interaction.response.send_message(f"🚫 {target.display_name} を拒否しました。")
-
-
-@oracle_group.command(name="graduate", description="[管理者] メンバーをレベル上限等で卒業(キック)させます")
-@app_commands.describe(target="卒業させるメンバーを選択")
-async def graduate(interaction: discord.Interaction, target: discord.Member):
-    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
-                                                                                          ephemeral=True)
-    try:
-        await target.send(f"🌸 レベル上限({MAX_LEVEL})により卒業となります。")
-    except:
-        pass
-    await interaction.guild.kick(target, reason="レベル卒業")
-    if users_col is not None: users_col.delete_one({"discord_id": target.id})
-    await interaction.response.send_message(f"🎓 {target.display_name} を卒業させました。")
-
-
-@oracle_group.command(name="graduate_rank", description="[管理者] メンバーをランク昇格で卒業(キック)させます")
-@app_commands.describe(target="卒業させるメンバーを選択")
-async def graduate_rank(interaction: discord.Interaction, target: discord.Member):
-    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
-                                                                                          ephemeral=True)
-    try:
-        await target.send(f"🎉 ランク昇格おめでとうございます！卒業となります。")
-    except:
-        pass
-    await interaction.guild.kick(target, reason="ランク昇格")
-    if users_col is not None: users_col.delete_one({"discord_id": target.id})
-    await interaction.response.send_message(f"🎉 {target.display_name} を卒業させました。")
-
-
-@oracle_group.command(name="dashboard", description="[管理者] 管理パネルを開きます")
-async def dashboard(interaction: discord.Interaction):
-    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
-                                                                                          ephemeral=True)
-    await update_dashboard(interaction)
-
-
-@oracle_group.command(name="audit", description="[管理者] 全メンバーのレベルを一斉監査します")
-async def audit(interaction: discord.Interaction):
-    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
-                                                                                          ephemeral=True)
-    await interaction.response.defer()
-    await run_audit_logic(interaction)
-
-
-@oracle_group.command(name="set_mode", description="[管理者] 審査基準モードを変更します")
-@app_commands.choices(mode=[
-    app_commands.Choice(name='初心者帯 (BEGINNER)', value='BEGINNER'),
-    app_commands.Choice(name='中級者帯 (INTERMEDIATE)', value='INTERMEDIATE'),
-    app_commands.Choice(name='上級者帯 (ADVANCED)', value='ADVANCED'),
-])
-async def set_mode_cmd(interaction: discord.Interaction, mode: app_commands.Choice[str]):
-    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
-                                                                                          ephemeral=True)
-    global current_mode
-    current_mode = mode.value
-    await interaction.response.send_message(f"✅ モード変更: {THRESHOLDS[mode.value]['name']}")
-
-
-@oracle_group.command(name="shutdown", description="[管理者] Botを安全に停止させます")
-async def shutdown(interaction: discord.Interaction):
-    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
-                                                                                          ephemeral=True)
-    await interaction.response.send_message("システムをシャットダウンします...")
-    await bot.close()
 
 
 @oracle_group.command(name="list", description="サーバーの登録メンバー一覧とOP.GGリンクを表示します")
@@ -649,6 +564,101 @@ async def help_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+# 🔴 管理者専用コマンド (一般ユーザーからは見えなくなります)
+@oracle_group.command(name="approve", description="[管理者] 申請を手動で承認します")
+@app_commands.describe(target="承認するメンバーを選択")
+@app_commands.default_permissions(administrator=True)  # ← これが隠す魔法です
+async def approve(interaction: discord.Interaction, target: discord.Member):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    role_mem = discord.utils.get(interaction.guild.roles, name=ROLE_MEMBER)
+    role_wait = discord.utils.get(interaction.guild.roles, name=ROLE_WAITING)
+    if role_wait in target.roles: await target.remove_roles(role_wait)
+    if role_mem: await target.add_roles(role_mem)
+    await interaction.response.send_message(f"✅ {target.display_name} を承認しました。")
+
+
+@oracle_group.command(name="reject", description="[管理者] 申請を拒否し、キックします")
+@app_commands.describe(target="拒否するメンバーを選択")
+@app_commands.default_permissions(administrator=True)
+async def reject(interaction: discord.Interaction, target: discord.Member):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    await interaction.guild.kick(target, reason="審査拒否")
+    await interaction.response.send_message(f"🚫 {target.display_name} を拒否しました。")
+
+
+@oracle_group.command(name="graduate", description="[管理者] メンバーをレベル上限等で卒業(キック)させます")
+@app_commands.describe(target="卒業させるメンバーを選択")
+@app_commands.default_permissions(administrator=True)
+async def graduate(interaction: discord.Interaction, target: discord.Member):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    try:
+        await target.send(f"🌸 レベル上限({MAX_LEVEL})により卒業となります。")
+    except:
+        pass
+    await interaction.guild.kick(target, reason="レベル卒業")
+    if users_col is not None: users_col.delete_one({"discord_id": target.id})
+    await interaction.response.send_message(f"🎓 {target.display_name} を卒業させました。")
+
+
+@oracle_group.command(name="graduate_rank", description="[管理者] メンバーをランク昇格で卒業(キック)させます")
+@app_commands.describe(target="卒業させるメンバーを選択")
+@app_commands.default_permissions(administrator=True)
+async def graduate_rank(interaction: discord.Interaction, target: discord.Member):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    try:
+        await target.send(f"🎉 ランク昇格おめでとうございます！卒業となります。")
+    except:
+        pass
+    await interaction.guild.kick(target, reason="ランク昇格")
+    if users_col is not None: users_col.delete_one({"discord_id": target.id})
+    await interaction.response.send_message(f"🎉 {target.display_name} を卒業させました。")
+
+
+@oracle_group.command(name="dashboard", description="[管理者] 管理パネルを開きます")
+@app_commands.default_permissions(administrator=True)
+async def dashboard(interaction: discord.Interaction):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    await update_dashboard(interaction)
+
+
+@oracle_group.command(name="audit", description="[管理者] 全メンバーのレベルを一斉監査します")
+@app_commands.default_permissions(administrator=True)
+async def audit(interaction: discord.Interaction):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    await interaction.response.defer()
+    await run_audit_logic(interaction)
+
+
+@oracle_group.command(name="set_mode", description="[管理者] 審査基準モードを変更します")
+@app_commands.choices(mode=[
+    app_commands.Choice(name='初心者帯 (BEGINNER)', value='BEGINNER'),
+    app_commands.Choice(name='中級者帯 (INTERMEDIATE)', value='INTERMEDIATE'),
+    app_commands.Choice(name='上級者帯 (ADVANCED)', value='ADVANCED'),
+])
+@app_commands.default_permissions(administrator=True)
+async def set_mode_cmd(interaction: discord.Interaction, mode: app_commands.Choice[str]):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    global current_mode
+    current_mode = mode.value
+    await interaction.response.send_message(f"✅ モード変更: {THRESHOLDS[mode.value]['name']}")
+
+
+@oracle_group.command(name="shutdown", description="[管理者] Botを安全に停止させます")
+@app_commands.default_permissions(administrator=True)
+async def shutdown(interaction: discord.Interaction):
+    if not is_admin_or_owner(interaction): return await interaction.response.send_message("❌ 権限がありません。",
+                                                                                          ephemeral=True)
+    await interaction.response.send_message("システムをシャットダウンします...")
+    await bot.close()
+
+
 # グループをBotに登録
 bot.tree.add_command(oracle_group)
 
@@ -669,7 +679,7 @@ async def on_ready():
     if LOG_CHANNEL_ID:
         try:
             channel = bot.get_channel(LOG_CHANNEL_ID)
-            if channel: await channel.send("✅ **BOTが起動しました** (PyMongoエラー修正完了)")
+            if channel: await channel.send("✅ **BOTが起動しました** (管理者コマンド非表示設定完了)")
         except:
             pass
 
